@@ -1,0 +1,1244 @@
+<?php
+
+namespace App\Models;
+
+use CodeIgniter\Model;
+
+class ReportModel extends Model
+{
+    protected $table = 'reports';
+    protected $primaryKey = 'id';
+    protected $useAutoIncrement = true;
+    protected $returnType = 'array';
+    protected $useSoftDeletes = true;
+    protected $allowedFields = [
+        'report_name', 'description', 'base_query', 'selected_columns',
+        'where_conditions', 'group_by', 'order_by', 'filter_parameters',
+        'is_active', 'created_by', 'updated_by'
+    ];
+    protected $useTimestamps = true;
+    protected $createdField = 'created_at';
+    protected $updatedField = 'updated_at';
+    protected $deletedField = 'deleted_at';
+
+    // Validation rules
+    protected $validationRules = [
+        'report_name' => 'required|min_length[3]|max_length[255]',
+        'base_query' => 'required',
+    ];
+
+    protected $validationMessages = [
+        'report_name' => [
+            'required' => 'Report name is required',
+            'min_length' => 'Report name must be at least 3 characters',
+            'max_length' => 'Report name cannot exceed 255 characters',
+        ],
+        'base_query' => [
+            'required' => 'SQL query is required',
+        ],
+    ];
+
+    /**
+     * Parse SQL query and extract components
+     */
+/**
+ * Parse SQL query and extract components
+ */
+public function parseQuery($sql)
+{
+    $components = [
+        'selected_columns' => [],
+        'where_conditions' => [],
+        'group_by' => [],
+        'order_by' => [],
+        'filter_parameters' => []
+    ];
+
+    try {
+        // Normalize SQL for easier parsing
+        $sql = trim($sql);
+        $sql = rtrim($sql, ';');
+        
+        // Remove comments
+        $sql = preg_replace('/\/\*.*?\*\//s', '', $sql);
+        $sql = preg_replace('/--.*?$/m', '', $sql);
+        
+        // Extract SELECT columns
+        if (preg_match('/SELECT\s+(.*?)\s+FROM\s+/is', $sql, $matches)) {
+            $selectPart = $matches[1];
+            $columns = $this->splitSelectColumns($selectPart);
+            foreach ($columns as $col) {
+                $col = trim($col);
+                if (!empty($col)) {
+                    // Extract alias
+                    $alias = $this->extractColumnAlias($col);
+                    $original = $this->cleanColumnOriginal($col);
+                    
+                    $components['selected_columns'][] = [
+                        'original' => $original,
+                        'alias' => $alias,
+                        'display' => true
+                    ];
+                }
+            }
+        }
+
+        // Extract WHERE clause (if exists) - handle ORDER BY and GROUP BY separately
+        $wherePattern = '/WHERE\s+(.*?)(?:\s+(?:GROUP BY|ORDER BY|LIMIT)|\s*$)/is';
+        $whereClause = '';
+        
+        if (preg_match($wherePattern, $sql, $matches)) {
+            $whereClause = trim($matches[1]);
+            
+            // Extract WHERE conditions from the WHERE clause only
+            if (!empty($whereClause)) {
+                $components['where_conditions'] = $this->extractConditionsFromWhereClause($whereClause);
+            }
+        }
+        
+        // Extract filter parameters from WHERE conditions
+        if (!empty($components['where_conditions'])) {
+            $components['filter_parameters'] = $this->extractAllFilterParametersFromConditions($components['where_conditions']);
+        }
+
+        // Extract GROUP BY - improved pattern to avoid ORDER BY confusion
+        $groupByPattern = '/GROUP BY\s+(.*?)(?:\s+(?:ORDER BY|LIMIT|$)|\s*$)/is';
+        if (preg_match($groupByPattern, $sql, $matches)) {
+            $groupByPart = trim($matches[1]);
+            // Make sure we don't capture ORDER BY
+            if (stripos($groupByPart, 'ORDER BY') !== false) {
+                $groupByPart = preg_replace('/\s+ORDER BY.*$/i', '', $groupByPart);
+            }
+            $groupByItems = $this->splitSqlByComma($groupByPart);
+            foreach ($groupByItems as $group) {
+                $group = trim($group);
+                if (!empty($group)) {
+                    $components['group_by'][] = [
+                        'original' => $group
+                    ];
+                }
+            }
+        }
+
+        // Extract ORDER BY - improved pattern
+        $orderByPattern = '/ORDER BY\s+(.*?)(?:\s+(?:GROUP BY|LIMIT|$)|\s*$)/is';
+        if (preg_match($orderByPattern, $sql, $matches)) {
+            $orderByPart = trim($matches[1]);
+            // Make sure we don't capture GROUP BY or other clauses
+            if (stripos($orderByPart, 'GROUP BY') !== false) {
+                $orderByPart = preg_replace('/\s+GROUP BY.*$/i', '', $orderByPart);
+            }
+            $orderByItems = $this->splitSqlByComma($orderByPart);
+            foreach ($orderByItems as $order) {
+                $order = trim($order);
+                if (!empty($order)) {
+                    $parts = preg_split('/\s+/', $order, 2);
+                    $column = trim($parts[0]);
+                    $direction = isset($parts[1]) ? strtoupper(trim($parts[1])) : 'ASC';
+                    
+                    $components['order_by'][] = [
+                        'original' => $column,
+                        'direction' => $direction
+                    ];
+                }
+            }
+        }
+
+    } catch (\Exception $e) {
+        log_message('error', 'Query parsing error: ' . $e->getMessage());
+    }
+
+    return $components;
+}
+
+private function cleanColumnOriginal($column)
+{
+    // Remove AS alias if present
+    $column = preg_replace('/\s+AS\s+[\w]+$/i', '', $column);
+    $column = preg_replace('/\s+as\s+[\w]+$/i', '', $column);
+    
+    return trim($column);
+}
+
+private function extractAllFilterParametersFromConditions($whereConditions)
+{
+    $filters = [];
+    
+    foreach ($whereConditions as $condition) {
+        if (!$condition['editable']) {
+            continue;
+        }
+        
+        $filter = [
+            'type' => $condition['type'],
+            'column' => $condition['column'],
+            'operator' => isset($condition['operator']) ? $condition['operator'] : $condition['type'],
+            'editable' => true
+        ];
+        
+        // Add values based on type
+        switch ($condition['type']) {
+            case 'IN':
+                $filter['values'] = $condition['values'];
+                $filter['multiple'] = true;
+                break;
+                
+            case 'BETWEEN':
+                $filter['from'] = $condition['from'];
+                $filter['to'] = $condition['to'];
+                break;
+                
+            case 'LIKE':
+                $filter['value'] = $condition['value'];
+                $filter['wildcard'] = true;
+                break;
+                
+            case 'COMPARISON':
+            case 'FUNCTION_COMPARISON':
+                $filter['value'] = $condition['value'];
+                break;
+        }
+        
+        $filters[] = $filter;
+    }
+    
+    return $filters;
+}
+
+
+
+private function extractColumnAlias($column)
+{
+    // Remove trailing spaces
+    $column = trim($column);
+    
+    // Check for AS alias
+    if (preg_match('/(.*?)\s+(?:AS\s+)?([\w]+)$/i', $column, $matches)) {
+        $potentialAlias = trim($matches[2]);
+        
+        // Check if the part before AS ends with ) or is a valid column
+        $beforeAlias = trim($matches[1]);
+        
+        if (preg_match('/\)\s*$/', $beforeAlias) || 
+            preg_match('/^[\w\.]+$/', $potentialAlias) ||
+            preg_match('/\w+\(/i', $beforeAlias)) {
+            return $potentialAlias;
+        }
+    }
+    
+    // If no alias found, use the column name
+    $parts = explode('.', $column);
+    $lastPart = end($parts);
+    
+    // Clean the last part
+    $lastPart = preg_replace('/[^a-zA-Z0-9_]/', '', $lastPart);
+    
+    return $lastPart ?: 'column_' . uniqid();
+}
+
+private function splitSelectColumns($selectPart)
+{
+    $columns = [];
+    $current = '';
+    $depth = 0;
+    $inString = false;
+    $stringChar = '';
+    $length = strlen($selectPart);
+    
+    for ($i = 0; $i < $length; $i++) {
+        $char = $selectPart[$i];
+        
+        if (($char === "'" || $char === '"') && ($i === 0 || $selectPart[$i-1] !== '\\')) {
+            if (!$inString) {
+                $inString = true;
+                $stringChar = $char;
+            } elseif ($stringChar === $char) {
+                $inString = false;
+                $stringChar = '';
+            }
+            $current .= $char;
+        } elseif ($char === '(' && !$inString) {
+            $depth++;
+            $current .= $char;
+        } elseif ($char === ')' && !$inString) {
+            $depth--;
+            $current .= $char;
+        } elseif ($char === ',' && $depth === 0 && !$inString) {
+            $columns[] = trim($current);
+            $current = '';
+        } else {
+            $current .= $char;
+        }
+    }
+    
+    if (trim($current) !== '') {
+        $columns[] = trim($current);
+    }
+    
+    return $columns;
+}
+
+
+private function findColumnAlias($column, $selectedColumns)
+{
+    foreach ($selectedColumns as $col) {
+        // Check if column matches original or alias
+        if ($column === $col['original'] || $column === $col['alias']) {
+            return $col['alias'];
+        }
+        
+        // Check if column is part of original (for table.column format)
+        if (strpos($col['original'], $column) !== false) {
+            return $col['alias'];
+        }
+        
+        // Check if column ends with the same name
+        $parts = explode('.', $column);
+        $lastPart = end($parts);
+        if ($lastPart && strpos($col['alias'], $lastPart) !== false) {
+            return $col['alias'];
+        }
+    }
+    
+    return null;
+}
+
+private function splitSqlByComma($sql)
+{
+    $result = [];
+    $current = '';
+    $depth = 0;
+    $inString = false;
+    $stringChar = '';
+    $length = strlen($sql);
+    
+    for ($i = 0; $i < $length; $i++) {
+        $char = $sql[$i];
+        
+        if (($char === "'" || $char === '"') && ($i === 0 || $sql[$i-1] !== '\\')) {
+            if (!$inString) {
+                $inString = true;
+                $stringChar = $char;
+            } elseif ($stringChar === $char) {
+                $inString = false;
+                $stringChar = '';
+            }
+            $current .= $char;
+        } elseif ($char === '(' && !$inString) {
+            $depth++;
+            $current .= $char;
+        } elseif ($char === ')' && !$inString) {
+            $depth--;
+            $current .= $char;
+        } elseif ($char === ',' && $depth === 0 && !$inString) {
+            $result[] = trim($current);
+            $current = '';
+        } else {
+            $current .= $char;
+        }
+    }
+    
+    if (trim($current) !== '') {
+        $result[] = trim($current);
+    }
+    
+    return $result;
+}
+
+/**
+ * Extract all WHERE conditions
+ */
+private function extractWhereConditions($whereClause)
+{
+    $conditions = [];
+    
+    // Split by AND/OR while preserving parentheses
+    $tokens = $this->tokenizeWhereClause($whereClause);
+    
+    foreach ($tokens as $token) {
+        $token = trim($token);
+        if (!empty($token)) {
+            // Extract operator (AND/OR)
+            $operator = 'AND';
+            if (preg_match('/^(AND|OR)\s+/i', $token, $opMatch)) {
+                $operator = strtoupper($opMatch[1]);
+                $token = substr($token, strlen($opMatch[0]));
+            }
+            
+            // Parse the condition
+            $parsedCondition = $this->parseCondition($token);
+            if ($parsedCondition) {
+                $conditions[] = array_merge($parsedCondition, ['operator' => $operator]);
+            }
+        }
+    }
+    
+    return $conditions;
+}
+
+private function extractAllWhereConditions($sql)
+{
+    $allConditions = [];
+    
+    // Extract WHERE clauses from main query and subqueries
+    $whereMatches = [];
+    
+    // Pattern to find WHERE clauses (including in subqueries)
+    $pattern = '/(?:WHERE|HAVING)\s+((?:(?:(?:\([^)]+\)|[^()])+?)(?=\s+(?:AND|OR|GROUP BY|ORDER BY|LIMIT|\)|$)))+)/is';
+    
+    if (preg_match_all($pattern, $sql, $matches, PREG_SET_ORDER)) {
+        foreach ($matches as $match) {
+            $whereClause = trim($match[1]);
+            
+            // Check if it's a complex clause (contains SELECT)
+            if (stripos($whereClause, 'SELECT') !== false) {
+                // Handle subqueries in WHERE
+                $conditions = $this->extractConditionsFromSubqueryWhere($whereClause);
+            } else {
+                // Handle regular WHERE conditions
+                $conditions = $this->extractConditionsFromWhereClause($whereClause);
+            }
+            
+            $allConditions = array_merge($allConditions, $conditions);
+        }
+    }
+    
+    return $allConditions;
+}
+
+private function extractConditionsFromSubqueryWhere($whereClause)
+{
+    $conditions = [];
+    
+    // Extract subquery conditions (simplified)
+    if (preg_match('/WHERE\s+(.*?)(?:\s+(?:GROUP BY|ORDER BY|\))|\s*$)/is', $whereClause, $matches)) {
+        $subWhereClause = trim($matches[1]);
+        $subConditions = $this->extractConditionsFromWhereClause($subWhereClause);
+        
+        // Mark these as subquery conditions
+        foreach ($subConditions as $condition) {
+            $condition['is_subquery'] = true;
+            $conditions[] = $condition;
+        }
+    }
+    
+    return $conditions;
+}
+
+private function extractConditionsFromWhereClause($whereClause)
+{
+    $conditions = [];
+    
+    // Clean up the WHERE clause - remove any trailing ORDER BY, GROUP BY
+    $whereClause = trim($whereClause);
+    $whereClause = preg_replace('/\s+(?:ORDER BY|GROUP BY|LIMIT).*$/i', '', $whereClause);
+    
+    // If WHERE clause is empty after cleaning, return empty array
+    if (empty($whereClause)) {
+        return $conditions;
+    }
+    
+    // Remove any nested SELECT subqueries temporarily
+    $whereClause = preg_replace('/\(SELECT.*?\)/is', '(subquery)', $whereClause);
+    
+    // Split by AND/OR at top level
+    $tokens = preg_split('/\s+(AND|OR)\s+(?![^()]*\))/i', $whereClause, -1, PREG_SPLIT_DELIM_CAPTURE);
+    
+    $currentCondition = '';
+    $currentOperator = 'AND';
+    
+    for ($i = 0; $i < count($tokens); $i++) {
+        $token = trim($tokens[$i]);
+        
+        if (strtoupper($token) === 'AND' || strtoupper($token) === 'OR') {
+            if ($currentCondition !== '') {
+                $parsed = $this->parseCondition($currentCondition);
+                if ($parsed) {
+                    $conditions[] = array_merge($parsed, ['operator' => $currentOperator]);
+                }
+                $currentCondition = '';
+            }
+            $currentOperator = strtoupper($token);
+        } else {
+            if ($currentCondition === '') {
+                $currentCondition = $token;
+            } else {
+                $currentCondition .= ' ' . $currentOperator . ' ' . $token;
+            }
+        }
+    }
+    
+    // Add last condition
+    if ($currentCondition !== '') {
+        $parsed = $this->parseCondition($currentCondition);
+        if ($parsed) {
+            $conditions[] = array_merge($parsed, ['operator' => $currentOperator]);
+        }
+    }
+    
+    return $conditions;
+}
+
+private function parseSingleCondition($condition)
+{
+    // Pattern for IN condition with parentheses
+    if (preg_match('/^(\w+(?:\.\w+)?)\s+IN\s*\(\s*(.+?)\s*\)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $values = trim($matches[2]);
+        
+        $valueList = $this->splitSqlByComma($values);
+        $cleanValues = array_map(function($v) {
+            $v = trim($v);
+            return trim($v, " '\"");
+        }, $valueList);
+        
+        return [
+            'condition' => $condition,
+            'type' => 'IN',
+            'column' => $column,
+            'values' => $cleanValues,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for LIKE with wildcards
+    if (preg_match('/^(\w+(?:\.\w+)?)\s+LIKE\s+(.+)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $pattern = trim($matches[2]);
+        $value = trim($pattern, " '\"");
+        
+        // Extract value without wildcards for default
+        $defaultValue = str_replace(['%', '_'], '', $value);
+        
+        return [
+            'condition' => $condition,
+            'type' => 'LIKE',
+            'column' => $column,
+            'pattern' => $pattern,
+            'value' => $defaultValue,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for comparison operators
+    if (preg_match('/^(\w+(?:\.\w+)?)\s*([=!<>]+|!=|<=|>=|<>)\s*(.+)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $operator = trim($matches[2]);
+        $value = trim($matches[3]);
+        
+        $cleanValue = trim($value, " '\"");
+        
+        return [
+            'condition' => $condition,
+            'type' => 'COMPARISON',
+            'column' => $column,
+            'operator' => $operator,
+            'value' => $cleanValue,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for function comparisons like LOWER(column) IN (...)
+    if (preg_match('/^(\w+\([^)]+\))\s+IN\s*\(\s*(.+?)\s*\)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $values = trim($matches[2]);
+        
+        $valueList = $this->splitSqlByComma($values);
+        $cleanValues = array_map(function($v) {
+            $v = trim($v);
+            return trim($v, " '\"");
+        }, $valueList);
+        
+        return [
+            'condition' => $condition,
+            'type' => 'IN',
+            'column' => $column,
+            'values' => $cleanValues,
+            'editable' => true
+        ];
+    }
+    
+    // Default: treat as raw condition
+    return [
+        'condition' => $condition,
+        'type' => 'RAW',
+        'column' => $this->extractColumnFromCondition($condition),
+        'editable' => false
+    ];
+}
+
+private function extractColumnFromCondition($condition)
+{
+    if (preg_match('/^(\w+(?:\.\w+)?)/', $condition, $matches)) {
+        return $matches[1];
+    }
+    
+    if (preg_match('/^(\w+\([^)]+\))/', $condition, $matches)) {
+        return $matches[1];
+    }
+    
+    return 'Unknown';
+}
+
+/**
+ * Tokenize WHERE clause
+ */
+private function tokenizeWhereClause($whereClause)
+{
+    $tokens = [];
+    $current = '';
+    $depth = 0;
+    $length = strlen($whereClause);
+    
+    for ($i = 0; $i < $length; $i++) {
+        $char = $whereClause[$i];
+        
+        if ($char === '(') {
+            $depth++;
+            $current .= $char;
+        } elseif ($char === ')') {
+            $depth--;
+            $current .= $char;
+        } elseif ($char === "'" || $char === '"') {
+            // Handle quoted strings
+            $quote = $char;
+            $current .= $char;
+            $i++;
+            while ($i < $length && $whereClause[$i] !== $quote) {
+                $current .= $whereClause[$i];
+                $i++;
+            }
+            if ($i < $length) {
+                $current .= $whereClause[$i];
+            }
+        } elseif ($depth === 0 && preg_match('/\b(AND|OR)\b/i', substr($whereClause, $i, 3))) {
+            // Check for AND/OR operators at depth 0
+            if (trim($current) !== '') {
+                $tokens[] = trim($current);
+            }
+            $current = '';
+            $i += 2; // Skip AND/OR
+        } else {
+            $current .= $char;
+        }
+    }
+    
+    if (trim($current) !== '') {
+        $tokens[] = trim($current);
+    }
+    
+    return $tokens;
+}
+
+/**
+ * Parse individual condition
+ */
+private function parseCondition($condition)
+{
+    $condition = trim($condition);
+    
+    // Remove any trailing ORDER BY, GROUP BY, LIMIT
+    $condition = preg_replace('/\s+(ORDER BY|GROUP BY|LIMIT).*$/i', '', $condition);
+    
+    // Pattern for BETWEEN condition
+    if (preg_match('/^(\w+(?:\.\w+)?\s*\(\s*\w+\s*\)?)\s+BETWEEN\s+(.+?)\s+AND\s+(.+)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $from = trim($matches[2]);
+        $to = trim($matches[3]);
+        
+        $from = trim($from, " '\"");
+        $to = trim($to, " '\"");
+        
+        return [
+            'condition' => $condition,
+            'type' => 'BETWEEN',
+            'column' => $column,
+            'from' => $from,
+            'to' => $to,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for IN condition with parentheses
+    if (preg_match('/^(\w+(?:\.\w+)?\s*\(\s*\w+\s*\)?)\s+IN\s*\(\s*(.+?)\s*\)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $values = trim($matches[2]);
+        
+        $valueList = $this->splitSqlByComma($values);
+        $cleanValues = array_map(function($v) {
+            $v = trim($v);
+            return trim($v, " '\"");
+        }, $valueList);
+        
+        return [
+            'condition' => $condition,
+            'type' => 'IN',
+            'column' => $column,
+            'values' => $cleanValues,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for LIKE with wildcards
+    if (preg_match('/^(\w+(?:\.\w+)?)\s+LIKE\s+(.+)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $pattern = trim($matches[2]);
+        $value = trim($pattern, " '\"");
+        
+        $defaultValue = str_replace(['%', '_'], '', $value);
+        
+        return [
+            'condition' => $condition,
+            'type' => 'LIKE',
+            'column' => $column,
+            'pattern' => $pattern,
+            'value' => $defaultValue,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for comparison operators - FIXED: handle quoted values properly
+    if (preg_match('/^(\w+(?:\.\w+)?)\s*([=!<>]+|!=|<=|>=|<>)\s*(.+)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $operator = trim($matches[2]);
+        $value = trim($matches[3]);
+        
+        // Handle quoted values properly
+        if (preg_match('/^[\'"](.*)[\'"]$/', $value, $quoteMatches)) {
+            $cleanValue = $quoteMatches[1];
+        } else {
+            $cleanValue = $value;
+        }
+        
+        return [
+            'condition' => $condition,
+            'type' => 'COMPARISON',
+            'column' => $column,
+            'operator' => $operator,
+            'value' => $cleanValue,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for function comparisons like DATE(column) < value
+    if (preg_match('/^(\w+\([^)]+\))\s*([<>=]+)\s*(.+)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $operator = trim($matches[2]);
+        $value = trim($matches[3]);
+        
+        // Handle quoted values properly
+        if (preg_match('/^[\'"](.*)[\'"]$/', $value, $quoteMatches)) {
+            $cleanValue = $quoteMatches[1];
+        } else {
+            $cleanValue = $value;
+        }
+        
+        return [
+            'condition' => $condition,
+            'type' => 'FUNCTION_COMPARISON',
+            'column' => $column,
+            'operator' => $operator,
+            'value' => $cleanValue,
+            'editable' => true
+        ];
+    }
+    
+    // Pattern for IS NULL/IS NOT NULL
+    if (preg_match('/^(\w+(?:\.\w+)?)\s+(IS\s+(?:NOT\s+)?NULL)$/i', $condition, $matches)) {
+        $column = trim($matches[1]);
+        $operator = trim($matches[2]);
+        
+        return [
+            'condition' => $condition,
+            'type' => 'IS_NULL',
+            'column' => $column,
+            'operator' => $operator,
+            'editable' => true
+        ];
+    }
+    
+    // Default: treat as raw condition
+    $column = $this->extractColumnFromCondition($condition);
+    
+    return [
+        'condition' => $condition,
+        'type' => 'RAW',
+        'column' => $column ?: 'Unknown',
+        'editable' => false
+    ];
+}
+
+/**
+ * Parse IN condition
+ */
+private function parseInCondition($matches)
+{
+    $column = trim($matches[1]);
+    $values = trim($matches[2]);
+    
+    // Parse values
+    $valueList = preg_split('/,\s*(?=(?:[^"]*"[^"]*")*[^"]*$)/', $values);
+    $cleanValues = array_map(function($v) {
+        $v = trim($v);
+        return trim($v, " '\"");
+    }, $valueList);
+    
+    return [
+        'condition' => $column . ' IN (' . $values . ')',
+        'type' => 'IN',
+        'column' => $column,
+        'values' => $cleanValues,
+        'editable' => true
+    ];
+}
+
+/**
+ * Parse BETWEEN condition
+ */
+private function parseBetweenCondition($matches)
+{
+    $column = trim($matches[1]);
+    $from = trim($matches[2]);
+    $to = trim($matches[3]);
+    
+    $from = trim($from, " '\"");
+    $to = trim($to, " '\"");
+    
+    return [
+        'condition' => $column . ' BETWEEN ' . $from . ' AND ' . $to,
+        'type' => 'BETWEEN',
+        'column' => $column,
+        'from' => $from,
+        'to' => $to,
+        'editable' => true
+    ];
+}
+
+/**
+ * Parse LIKE condition
+ */
+private function parseLikeCondition($matches)
+{
+    $column = trim($matches[1]);
+    $pattern = trim($matches[2]);
+    $value = trim($pattern, " '\"");
+    
+    // Remove wildcards for default value
+    $defaultValue = str_replace(['%', '_'], '', $value);
+    
+    return [
+        'condition' => $column . ' LIKE ' . $pattern,
+        'type' => 'LIKE',
+        'column' => $column,
+        'pattern' => $pattern,
+        'value' => $defaultValue,
+        'editable' => true
+    ];
+}
+
+/**
+ * Parse comparison condition
+ */
+private function parseComparisonCondition($matches)
+{
+    $column = trim($matches[1]);
+    $operator = trim($matches[2]);
+    $value = trim($matches[3]);
+    
+    // Clean value (remove quotes for default)
+    $cleanValue = trim($value, " '\"");
+    
+    return [
+        'condition' => $column . ' ' . $operator . ' ' . $value,
+        'type' => 'COMPARISON',
+        'column' => $column,
+        'operator' => $operator,
+        'value' => $cleanValue,
+        'editable' => true
+    ];
+}
+
+/**
+ * Parse IS NULL condition
+ */
+private function parseIsNullCondition($matches)
+{
+    $column = trim($matches[1]);
+    $operator = trim($matches[2]);
+    
+    return [
+        'condition' => $column . ' ' . $operator,
+        'type' => 'IS_NULL',
+        'column' => $column,
+        'operator' => $operator,
+        'editable' => true
+    ];
+}
+
+/**
+ * Extract all filter parameters from WHERE clause
+ */
+private function extractAllFilterParameters($whereClause)
+{
+    $filters = [];
+    
+    // First, tokenize the WHERE clause
+    $tokens = $this->tokenizeWhereClause($whereClause);
+    
+    foreach ($tokens as $token) {
+        $token = trim($token);
+        
+        // Skip if it starts with AND/OR
+        if (preg_match('/^(AND|OR)\s+/i', $token, $opMatch)) {
+            $token = substr($token, strlen($opMatch[0]));
+        }
+        
+        // Parse the condition
+        $condition = $this->parseCondition($token);
+        
+        if ($condition && $condition['editable']) {
+            $filter = [
+                'type' => $condition['type'],
+                'column' => $condition['column'],
+                'operator' => isset($condition['operator']) ? $condition['operator'] : $condition['type'],
+                'editable' => true
+            ];
+            
+            // Add values based on type
+            switch ($condition['type']) {
+                case 'IN':
+                    $filter['values'] = $condition['values'];
+                    $filter['multiple'] = true;
+                    break;
+                    
+                case 'BETWEEN':
+                    $filter['from'] = $condition['from'];
+                    $filter['to'] = $condition['to'];
+                    break;
+                    
+                case 'LIKE':
+                    $filter['value'] = $condition['value'];
+                    $filter['wildcard'] = true;
+                    break;
+                    
+                case 'COMPARISON':
+                    $filter['value'] = $condition['value'];
+                    break;
+                    
+                case 'IS_NULL':
+                    $filter['value'] = 'NULL';
+                    break;
+            }
+            
+            $filters[] = $filter;
+        }
+    }
+    
+    return $filters;
+}
+
+    /**
+     * Parse WHERE clause to extract conditions
+     */
+    private function parseWhereClause($whereClause)
+    {
+        $conditions = [];
+        
+        // Split by AND/OR but preserve subqueries
+        $pattern = '/(?:(?:\([^)]+\)|[^()]+)+)(?=\s+(?:AND|OR)|\s*$)/i';
+        preg_match_all($pattern, $whereClause, $matches);
+        
+        if (!empty($matches[0])) {
+            foreach ($matches[0] as $condition) {
+                $condition = trim($condition);
+                if (!empty($condition)) {
+                    $conditions[] = [
+                        'condition' => $condition,
+                        'operator' => 'AND',
+                        'editable' => true
+                    ];
+                }
+            }
+        }
+        
+        return $conditions;
+    }
+
+    /**
+     * Extract filter parameters from WHERE clause
+     */
+    private function extractFilterParameters($whereClause)
+    {
+        $filters = [];
+        
+        // Pattern to find IN clauses with specific values
+        $pattern = '/(\w+(?:\.\w+)?)\s+IN\s*\(\s*([^)]+)\s*\)/i';
+        preg_match_all($pattern, $whereClause, $matches, PREG_SET_ORDER);
+        
+        foreach ($matches as $match) {
+            $column = trim($match[1]);
+            $values = trim($match[2]);
+            
+            // Split values and clean them
+            $valueArray = explode(',', $values);
+            $cleanValues = array_map(function($v) {
+                $v = trim($v);
+                // Remove quotes
+                $v = trim($v, " '\"");
+                return $v;
+            }, $valueArray);
+            
+            // Filter out empty values
+            $cleanValues = array_filter($cleanValues);
+            
+            if (!empty($cleanValues)) {
+                $filters[] = [
+                    'type' => 'IN',
+                    'column' => $column,
+                    'values' => array_values($cleanValues),
+                    'multiple' => true,
+                    'operator' => 'IN'
+                ];
+            }
+        }
+        
+        // Pattern to find LIKE clauses with wildcards
+        $pattern = '/(\w+(?:\.\w+)?)\s+LIKE\s*[\'"]([^\'"]+)[\'"]/i';
+        preg_match_all($pattern, $whereClause, $matches, PREG_SET_ORDER);
+        
+        foreach ($matches as $match) {
+            $column = trim($match[1]);
+            $patternValue = trim($match[2]);
+            
+            // Check if it's a wildcard search
+            if (strpos($patternValue, '%') !== false) {
+                $cleanValue = str_replace('%', '', $patternValue);
+                if (!empty($cleanValue)) {
+                    $filters[] = [
+                        'type' => 'LIKE',
+                        'column' => $column,
+                        'value' => $cleanValue,
+                        'wildcard' => true,
+                        'operator' => 'LIKE'
+                    ];
+                }
+            }
+        }
+        
+        // Pattern to find equality conditions
+        $pattern = '/(\w+(?:\.\w+)?)\s*=\s*[\'"]?([^\'"\s]+)[\'"]?/i';
+        preg_match_all($pattern, $whereClause, $matches, PREG_SET_ORDER);
+        
+        foreach ($matches as $match) {
+            $column = trim($match[1]);
+            $value = trim($match[2]);
+            
+            if (!empty($value) && !is_numeric($column)) {
+                $filters[] = [
+                    'type' => 'EQUALS',
+                    'column' => $column,
+                    'value' => $value,
+                    'operator' => '='
+                ];
+            }
+        }
+        
+        // Pattern to find BETWEEN conditions
+        $pattern = '/(\w+(?:\.\w+)?)\s+BETWEEN\s+[\'"]?([^\'"\s]+)[\'"]?\s+AND\s+[\'"]?([^\'"\s]+)[\'"]?/i';
+        preg_match_all($pattern, $whereClause, $matches, PREG_SET_ORDER);
+        
+        foreach ($matches as $match) {
+            $column = trim($match[1]);
+            $from = trim($match[2]);
+            $to = trim($match[3]);
+            
+            $filters[] = [
+                'type' => 'BETWEEN',
+                'column' => $column,
+                'from' => $from,
+                'to' => $to,
+                'operator' => 'BETWEEN'
+            ];
+        }
+        
+        return $filters;
+    }
+
+    /**
+     * Execute report query with dynamic filters
+     */
+    public function executeReport($reportId, $filters = [])
+    {
+        $report = $this->find($reportId);
+        if (!$report) {
+            throw new \Exception('Report not found');
+        }
+
+        $sql = $report['base_query'];
+        $db = \Config\Database::connect();
+        
+        // Apply dynamic filters if provided
+        if (!empty($filters)) {
+            $sql = $this->applyFilters($sql, $filters, $db);
+        }
+
+        // Execute query
+        return $db->query($sql)->getResultArray();
+    }
+
+    /**
+     * Apply dynamic filters to SQL
+     */
+/**
+ * Apply dynamic filters to SQL
+ */
+/**
+ * Apply dynamic filters to SQL
+ */
+private function applyFilters($sql, $filters, $db)
+{
+    // If no filters, return original SQL
+    if (empty($filters)) {
+        return $sql;
+    }
+    
+    // Get the report to access original conditions
+    $report = $this->find($filters['report_id'] ?? 0);
+    $originalConditions = [];
+    if ($report && isset($report['where_conditions'])) {
+        $originalConditions = json_decode($report['where_conditions'], true);
+    }
+    
+    // Build replacement map for WHERE conditions
+    $replacements = [];
+    
+    foreach ($filters as $key => $value) {
+        if (empty($value) && $value !== '0' && $value !== 0) {
+            continue;
+        }
+        
+        // Skip special keys
+        if (in_array($key, ['group_by', 'order_by', 'report_id'])) {
+            continue;
+        }
+        
+        // Find matching original condition
+        $originalCondition = null;
+        foreach ($originalConditions as $cond) {
+            if (isset($cond['column']) && $cond['column'] === $key) {
+                $originalCondition = $cond;
+                break;
+            }
+        }
+        
+        if (!$originalCondition) {
+            continue;
+        }
+        
+        // Build replacement based on condition type
+        switch ($originalCondition['type'] ?? '') {
+            case 'IN':
+                if (is_array($value) && !empty($value)) {
+                    $escapedValues = array_map(function($v) use ($db) {
+                        return "'" . $db->escape($v) . "'";
+                    }, $value);
+                    $replacements[$originalCondition['condition']] = 
+                        $originalCondition['column'] . " IN (" . implode(',', $escapedValues) . ")";
+                }
+                break;
+                
+            case 'BETWEEN':
+                $fromKey = 'FROM_' . $key;
+                $toKey = 'TO_' . $key;
+                
+                if (isset($filters[$fromKey]) && isset($filters[$toKey]) && 
+                    !empty($filters[$fromKey]) && !empty($filters[$toKey])) {
+                    $replacements[$originalCondition['condition']] = 
+                        $originalCondition['column'] . " BETWEEN '" . $db->escape($filters[$fromKey]) . "' AND '" . $db->escape($filters[$toKey]) . "'";
+                }
+                break;
+                
+            case 'LIKE':
+                $likeKey = 'LIKE_' . $key;
+                if (isset($filters[$likeKey]) && !empty($filters[$likeKey])) {
+                    $replacements[$originalCondition['condition']] = 
+                        $originalCondition['column'] . " LIKE '%" . $db->escapeLikeString($filters[$likeKey]) . "%'";
+                }
+                break;
+                
+            case 'COMPARISON':
+            case 'FUNCTION_COMPARISON':
+                $opKey = 'OP_' . $key;
+                $operator = isset($filters[$opKey]) ? $filters[$opKey] : ($originalCondition['operator'] ?? '=');
+                
+                if ($value === 'NULL') {
+                    $replacements[$originalCondition['condition']] = $originalCondition['column'] . " IS NULL";
+                } elseif ($value === 'NOT NULL') {
+                    $replacements[$originalCondition['condition']] = $originalCondition['column'] . " IS NOT NULL";
+                } else {
+                    $replacements[$originalCondition['condition']] = 
+                        $originalCondition['column'] . " " . $operator . " '" . $db->escape($value) . "'";
+                }
+                break;
+        }
+    }
+    
+    // Apply replacements to SQL
+    foreach ($replacements as $original => $replacement) {
+        $sql = str_replace($original, $replacement, $sql);
+    }
+    
+    // Apply GROUP BY
+    if (isset($filters['group_by']) && !empty($filters['group_by'])) {
+        $groupByColumns = array_filter((array)$filters['group_by']);
+        if (!empty($groupByColumns)) {
+            $groupByString = 'GROUP BY ' . implode(', ', $groupByColumns);
+            
+            if (stripos($sql, 'GROUP BY') !== false) {
+                $sql = preg_replace('/GROUP BY\s+(.*?)(?:\s+(?:ORDER BY|LIMIT)|\s*$)/is', 
+                                  $groupByString . ' ', 
+                                  $sql);
+            } else {
+                if (stripos($sql, 'ORDER BY') !== false) {
+                    $sql = preg_replace('/(\s+ORDER BY)/i', ' ' . $groupByString . '$1', $sql);
+                } else {
+                    $sql .= ' ' . $groupByString;
+                }
+            }
+        }
+    }
+    
+    // Apply ORDER BY
+    if (isset($filters['order_by']) && !empty($filters['order_by'])) {
+        $orderByClauses = [];
+        foreach ((array)$filters['order_by'] as $order) {
+            if (!empty($order['column'])) {
+                $direction = isset($order['direction']) ? strtoupper($order['direction']) : 'ASC';
+                $orderByClauses[] = $order['column'] . ' ' . $direction;
+            }
+        }
+        
+        if (!empty($orderByClauses)) {
+            $orderByString = 'ORDER BY ' . implode(', ', $orderByClauses);
+            
+            if (stripos($sql, 'ORDER BY') !== false) {
+                $sql = preg_replace('/ORDER BY\s+(.*?)(?:\s+LIMIT|\s*$)/is', 
+                                  $orderByString . ' ', 
+                                  $sql);
+            } else {
+                $sql .= ' ' . $orderByString;
+            }
+        }
+    }
+    
+    return $sql;
+}
+
+    /**
+     * Get all reports with pagination
+     */
+    public function getAllReports($perPage = 10, $page = 1)
+    {
+        return $this->paginate($perPage, 'default', $page);
+    }
+}

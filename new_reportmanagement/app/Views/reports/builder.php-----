@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title><?= esc($title) ?> - Report Builder</title>
+<!-- Use different CDN providers -->
+<link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/select2/4.1.0-rc.0/css/select2.min.css" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.css" rel="stylesheet">
+    <style>
+        .builder-section {
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+            background: #f8f9fa;
+        }
+        .section-header {
+            background: #e9ecef;
+            padding: 10px;
+            margin: -15px -15px 15px -15px;
+            border-radius: 5px 5px 0 0;
+            font-weight: bold;
+        }
+        .draggable-item {
+            cursor: move;
+            padding: 10px;
+            margin-bottom: 5px;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+        }
+        .CodeMirror {
+            border: 1px solid #dee2e6;
+            border-radius: 3px;
+            height: auto;
+            min-height: 100px;
+        }
+        .sql-preview {
+            background: #f5f5f5;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            padding: 10px;
+            font-family: monospace;
+            max-height: 300px;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="<?= site_url('/') ?>">Report Builder</a>
+            <div class="navbar-nav">
+                <a class="nav-link" href="<?= site_url('reports') ?>">Back to Reports</a>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <h2 class="mb-4"><?= esc($title) ?></h2>
+        
+        <form id="reportForm" method="post">
+            <input type="hidden" name="id" value="<?= $report['id'] ?? '' ?>">
+            
+            <!-- Basic Information -->
+            <div class="builder-section">
+                <div class="section-header">Basic Information</div>
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label class="form-label">Report Name *</label>
+                            <input type="text" class="form-control" name="report_name" 
+                                   value="<?= old('report_name', $report['report_name'] ?? '') ?>" required>
+                        </div>
+                    </div>
+                    <div class="col-md-6">
+                        <div class="mb-3">
+                            <label class="form-label">Base Table *</label>
+                            <select class="form-select select2-table" name="base_table" required 
+                                    onchange="loadTableColumns(this.value)">
+                                <option value="">Select a table...</option>
+                                <?php foreach ($tables as $table): ?>
+                                    <option value="<?= $table ?>" 
+                                        <?= ($report['base_table'] ?? '') === $table ? 'selected' : '' ?>>
+                                        <?= $table ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Description</label>
+                    <textarea class="form-control" name="description" rows="2"><?= old('description', $report['description'] ?? '') ?></textarea>
+                </div>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" name="is_active" value="1" 
+                           <?= ($report['is_active'] ?? 1) ? 'checked' : '' ?>>
+                    <label class="form-check-label">Active</label>
+                </div>
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" name="is_template" value="1"
+                           <?= ($report['is_template'] ?? 0) ? 'checked' : '' ?>>
+                    <label class="form-check-label">Save as Template</label>
+                </div>
+            </div>
+
+            <!-- Columns -->
+            <div class="builder-section">
+                <div class="section-header d-flex justify-content-between align-items-center">
+                    <span>Columns</span>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="addColumn()">
+                        <i class="fas fa-plus"></i> Add Column
+                    </button>
+                </div>
+                
+                <div id="columnsContainer">
+                    <?php if (!empty($report['columns'])): ?>
+                        <?php foreach ($report['columns'] as $index => $column): ?>
+                            <div class="draggable-item column-item" data-index="<?= $index ?>">
+                                <div class="row">
+                                    <div class="col-md-5">
+                                        <label class="form-label">Expression</label>
+                                        <textarea class="form-control sql-editor" 
+                                                  name="columns[<?= $index ?>][column_expression]"
+                                                  rows="2"><?= $column['column_expression'] ?></textarea>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label">Alias *</label>
+                                        <input type="text" class="form-control" 
+                                               name="columns[<?= $index ?>][alias]"
+                                               value="<?= $column['alias'] ?>" required>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label">Data Type</label>
+                                        <select class="form-select" 
+                                                name="columns[<?= $index ?>][data_type]">
+                                            <option value="string" <?= $column['data_type'] === 'string' ? 'selected' : '' ?>>String</option>
+                                            <option value="integer" <?= $column['data_type'] === 'integer' ? 'selected' : '' ?>>Integer</option>
+                                            <option value="decimal" <?= $column['data_type'] === 'decimal' ? 'selected' : '' ?>>Decimal</option>
+                                            <option value="date" <?= $column['data_type'] === 'date' ? 'selected' : '' ?>>Date</option>
+                                            <option value="datetime" <?= $column['data_type'] === 'datetime' ? 'selected' : '' ?>>Datetime</option>
+                                            <option value="boolean" <?= $column['data_type'] === 'boolean' ? 'selected' : '' ?>>Boolean</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label">Format</label>
+                                        <input type="text" class="form-control" 
+                                               name="columns[<?= $index ?>][format_pattern]"
+                                               value="<?= $column['format_pattern'] ?? '' ?>"
+                                               placeholder="e.g., currency, date:Y-m-d">
+                                    </div>
+                                </div>
+                                <div class="row mt-2">
+                                    <div class="col-md-12">
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="checkbox" 
+                                                   name="columns[<?= $index ?>][is_groupable]" value="1"
+                                                   <?= $column['is_groupable'] ? 'checked' : '' ?>>
+                                            <label class="form-check-label">Groupable</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="checkbox" 
+                                                   name="columns[<?= $index ?>][is_sortable]" value="1"
+                                                   <?= $column['is_sortable'] ? 'checked' : '' ?>>
+                                            <label class="form-check-label">Sortable</label>
+                                        </div>
+                                        <div class="form-check form-check-inline">
+                                            <input class="form-check-input" type="checkbox" 
+                                                   name="columns[<?= $index ?>][is_filterable]" value="1"
+                                                   <?= $column['is_filterable'] ? 'checked' : '' ?>>
+                                            <label class="form-check-label">Filterable</label>
+                                        </div>
+                                        <button type="button" class="btn btn-sm btn-danger float-end" 
+                                                onclick="removeColumn(this)">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <div class="text-center text-muted py-4">
+                            No columns defined. Add your first column.
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <!-- Joins -->
+            <div class="builder-section">
+                <div class="section-header d-flex justify-content-between align-items-center">
+                    <span>Joins</span>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="addJoin()">
+                        <i class="fas fa-plus"></i> Add Join
+                    </button>
+                </div>
+                
+                <div id="joinsContainer">
+                    <?php if (!empty($report['joins'])): ?>
+                        <?php foreach ($report['joins'] as $index => $join): ?>
+                            <div class="draggable-item join-item" data-index="<?= $index ?>">
+                                <div class="row">
+                                    <div class="col-md-2">
+                                        <label class="form-label">Type</label>
+                                        <select class="form-select" name="joins[<?= $index ?>][join_type]">
+                                            <option value="INNER" <?= $join['join_type'] === 'INNER' ? 'selected' : '' ?>>INNER</option>
+                                            <option value="LEFT" <?= $join['join_type'] === 'LEFT' ? 'selected' : '' ?>>LEFT</option>
+                                            <option value="RIGHT" <?= $join['join_type'] === 'RIGHT' ? 'selected' : '' ?>>RIGHT</option>
+                                            <option value="FULL" <?= $join['join_type'] === 'FULL' ? 'selected' : '' ?>>FULL</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <label class="form-label">Table *</label>
+                                        <input type="text" class="form-control" 
+                                               name="joins[<?= $index ?>][table_name]"
+                                               value="<?= $join['table_name'] ?>" required>
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label">Alias</label>
+                                        <input type="text" class="form-control" 
+                                               name="joins[<?= $index ?>][table_alias]"
+                                               value="<?= $join['table_alias'] ?? '' ?>">
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label">Condition *</label>
+                                        <input type="text" class="form-control" 
+                                               name="joins[<?= $index ?>][join_condition]"
+                                               value="<?= $join['join_condition'] ?>" required
+                                               placeholder="e.g., users.id = orders.user_id">
+                                    </div>
+                                    <div class="col-md-1">
+                                        <label class="form-label">Order</label>
+                                        <input type="number" class="form-control" 
+                                               name="joins[<?= $index ?>][join_order]"
+                                               value="<?= $join['join_order'] ?? $index ?>">
+                                    </div>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-danger mt-2" 
+                                        onclick="removeJoin(this)">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <div class="text-center text-muted py-4">
+                            No joins defined.
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="builder-section">
+                <div class="section-header d-flex justify-content-between align-items-center">
+                    <span>Filters</span>
+                    <button type="button" class="btn btn-sm btn-primary" onclick="addFilter()">
+                        <i class="fas fa-plus"></i> Add Filter
+                    </button>
+                </div>
+                
+                <div id="filtersContainer">
+                    <?php if (!empty($report['filters'])): ?>
+                        <?php foreach ($report['filters'] as $index => $filter): ?>
+                            <div class="draggable-item filter-item" data-index="<?= $index ?>">
+                                <div class="row">
+                                    <div class="col-md-3">
+                                        <label class="form-label">Type</label>
+                                        <select class="form-select filter-type" 
+                                                name="filters[<?= $index ?>][condition_type]"
+                                                onchange="toggleFilterFields(this)">
+                                            <option value="WHERE" <?= $filter['condition_type'] === 'WHERE' ? 'selected' : '' ?>>WHERE</option>
+                                            <option value="HAVING" <?= $filter['condition_type'] === 'HAVING' ? 'selected' : '' ?>>HAVING</option>
+                                            <option value="EXISTS" <?= $filter['condition_type'] === 'EXISTS' ? 'selected' : '' ?>>EXISTS</option>
+                                            <option value="NOT EXISTS" <?= $filter['condition_type'] === 'NOT EXISTS' ? 'selected' : '' ?>>NOT EXISTS</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-5">
+                                        <label class="form-label">Expression *</label>
+                                        <textarea class="form-control sql-editor" 
+                                                  name="filters[<?= $index ?>][condition_expression]"
+                                                  rows="2"><?= $filter['condition_expression'] ?></textarea>
+                                    </div>
+                                    <div class="col-md-4 filter-param-fields" 
+                                         style="<?= in_array($filter['condition_type'], ['WHERE', 'HAVING']) ? '' : 'display:none' ?>">
+                                        <div class="row">
+                                            <div class="col-md-6">
+                                                <label class="form-label">Parameter Name</label>
+                                                <input type="text" class="form-control" 
+                                                       name="filters[<?= $index ?>][parameter_name]"
+                                                       value="<?= $filter['parameter_name'] ?? '' ?>">
+                                            </div>
+                                            <div class="col-md-6">
+                                                <label class="form-label">Parameter Type</label>
+                                                <select class="form-select" 
+                                                        name="filters[<?= $index ?>][parameter_type]">
+                                                    <option value="string" <?= ($filter['parameter_type'] ?? 'string') === 'string' ? 'selected' : '' ?>>String</option>
+                                                    <option value="integer" <?= ($filter['parameter_type'] ?? '') === 'integer' ? 'selected' : '' ?>>Integer</option>
+                                                    <option value="decimal" <?= ($filter['parameter_type'] ?? '') === 'decimal' ? 'selected' : '' ?>>Decimal</option>
+                                                    <option value="date" <?= ($filter['parameter_type'] ?? '') === 'date' ? 'selected' : '' ?>>Date</option>
+                                                    <option value="datetime" <?= ($filter['parameter_type'] ?? '') === 'datetime' ? 'selected' : '' ?>>Datetime</option>
+                                                    <option value="boolean" <?= ($filter['parameter_type'] ?? '') === 'boolean' ? 'selected' : '' ?>>Boolean</option>
+                                                    <option value="array" <?= ($filter['parameter_type'] ?? '') === 'array' ? 'selected' : '' ?>>Array</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="row mt-2">
+                                            <div class="col-md-12">
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="checkbox" 
+                                                           name="filters[<?= $index ?>][is_required]" value="1"
+                                                           <?= ($filter['is_required'] ?? 0) ? 'checked' : '' ?>>
+                                                    <label class="form-check-label">Required</label>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-danger mt-2" 
+                                        onclick="removeFilter(this)">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <div class="text-center text-muted py-4">
+                            No filters defined.
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+
+            <!-- Groups and Orders -->
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="builder-section">
+                        <div class="section-header">Group By</div>
+                        <div id="groupsContainer">
+                            <?php if (!empty($report['groups'])): ?>
+                                <?php foreach ($report['groups'] as $index => $group): ?>
+                                    <div class="draggable-item group-item" data-index="<?= $index ?>">
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" 
+                                                   name="groups[<?= $index ?>][column_alias]"
+                                                   value="<?= $group['column_alias'] ?>"
+                                                   placeholder="Column alias">
+                                            <input type="number" class="form-control" style="width: 80px;"
+                                                   name="groups[<?= $index ?>][group_order]"
+                                                   value="<?= $group['group_order'] ?? $index ?>">
+                                            <button class="btn btn-outline-danger" type="button"
+                                                    onclick="removeGroup(this)">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-2" 
+                                onclick="addGroup()">
+                            <i class="fas fa-plus"></i> Add Group
+                        </button>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="builder-section">
+                        <div class="section-header">Order By</div>
+                        <div id="ordersContainer">
+                            <?php if (!empty($report['orders'])): ?>
+                                <?php foreach ($report['orders'] as $index => $order): ?>
+                                    <div class="draggable-item order-item" data-index="<?= $index ?>">
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" 
+                                                   name="orders[<?= $index ?>][column_alias]"
+                                                   value="<?= $order['column_alias'] ?>"
+                                                   placeholder="Column alias">
+                                            <select class="form-select" style="width: 100px;"
+                                                    name="orders[<?= $index ?>][direction]">
+                                                <option value="ASC" <?= $order['direction'] === 'ASC' ? 'selected' : '' ?>>ASC</option>
+                                                <option value="DESC" <?= $order['direction'] === 'DESC' ? 'selected' : '' ?>>DESC</option>
+                                            </select>
+                                            <input type="number" class="form-control" style="width: 80px;"
+                                                   name="orders[<?= $index ?>][order_priority]"
+                                                   value="<?= $order['order_priority'] ?? $index ?>">
+                                            <button class="btn btn-outline-danger" type="button"
+                                                    onclick="removeOrder(this)">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-primary mt-2" 
+                                onclick="addOrder()">
+                            <i class="fas fa-plus"></i> Add Order
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SQL Preview -->
+            <div class="builder-section">
+                <div class="section-header">SQL Preview</div>
+                <div class="sql-preview" id="sqlPreview">
+                    <!-- SQL will be generated here -->
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary mt-2" 
+                        onclick="generatePreview()">
+                    <i class="fas fa-sync"></i> Refresh Preview
+                </button>
+            </div>
+
+            <!-- Form Actions -->
+            <div class="text-center mt-4">
+                <button type="submit" class="btn btn-primary btn-lg">
+                    <i class="fas fa-save"></i> Save Report
+                </button>
+                <a href="<?= site_url('reports') ?>" class="btn btn-secondary btn-lg">
+                    <i class="fas fa-times"></i> Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+
+    <!-- Template for new items -->
+    <template id="columnTemplate">
+        <div class="draggable-item column-item">
+            <div class="row">
+                <div class="col-md-5">
+                    <label class="form-label">Expression</label>
+                    <textarea class="form-control sql-editor" name="columns[__INDEX__][column_expression]" rows="2"></textarea>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label">Alias *</label>
+                    <input type="text" class="form-control" name="columns[__INDEX__][alias]" required>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Data Type</label>
+                    <select class="form-select" name="columns[__INDEX__][data_type]">
+                        <option value="string">String</option>
+                        <option value="integer">Integer</option>
+                        <option value="decimal">Decimal</option>
+                        <option value="date">Date</option>
+                        <option value="datetime">Datetime</option>
+                        <option value="boolean">Boolean</option>
+                    </select>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label">Format</label>
+                    <input type="text" class="form-control" name="columns[__INDEX__][format_pattern]" placeholder="e.g., currency, date:Y-m-d">
+                </div>
+            </div>
+            <div class="row mt-2">
+                <div class="col-md-12">
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="checkbox" name="columns[__INDEX__][is_groupable]" value="1">
+                        <label class="form-check-label">Groupable</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="checkbox" name="columns[__INDEX__][is_sortable]" value="1" checked>
+                        <label class="form-check-label">Sortable</label>
+                    </div>
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="checkbox" name="columns[__INDEX__][is_filterable]" value="1">
+                        <label class="form-check-label">Filterable</label>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-danger float-end" onclick="removeColumn(this)">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/sql/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/hint/show-hint.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/hint/sql-hint.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.14.0/Sortable.min.js"></script>
+    <script src="https://kit.fontawesome.com/your-fontawesome-kit.js" crossorigin="anonymous"></script>
+
+    <script>
+        let columnIndex = <?= count($report['columns'] ?? []) ?>;
+        let joinIndex = <?= count($report['joins'] ?? []) ?>;
+        let filterIndex = <?= count($report['filters'] ?? []) ?>;
+        let groupIndex = <?= count($report['groups'] ?? []) ?>;
+        let orderIndex = <?= count($report['orders'] ?? []) ?>;
+
+        // Initialize Select2
+        $(document).ready(function() {
+            $('.select2-table').select2();
+            
+            // Initialize CodeMirror for SQL editors
+            document.querySelectorAll('.sql-editor').forEach(function(textarea) {
+                CodeMirror.fromTextArea(textarea, {
+                    mode: 'text/x-sql',
+                    lineNumbers: true,
+                    lineWrapping: true,
+                    extraKeys: {"Ctrl-Space": "autocomplete"},
+                    hintOptions: {tables: {}}
+                });
+            });
+            
+            // Make sections sortable
+            new Sortable(document.getElementById('columnsContainer'), {
+                handle: '.draggable-item',
+                animation: 150
+            });
+            
+            new Sortable(document.getElementById('joinsContainer'), {
+                handle: '.draggable-item',
+                animation: 150
+            });
+            
+            // Generate initial preview
+            generatePreview();
+        });
+
+        function loadTableColumns(table) {
+            if (!table) return;
+            
+            fetch(`<?= site_url('reports/get-table-columns') ?>?table=${table}`)
+                .then(response => response.json())
+                .then(columns => {
+                    // Store columns for SQL hints
+                    // This would be used to enhance the CodeMirror hint options
+                    console.log('Available columns:', columns);
+                });
+        }
+
+        function addColumn() {
+            const template = document.getElementById('columnTemplate').innerHTML;
+            const html = template.replace(/__INDEX__/g, columnIndex);
+            
+            const div = document.createElement('div');
+            div.innerHTML = html;
+            div.querySelector('.column-item').setAttribute('data-index', columnIndex);
+            
+            document.getElementById('columnsContainer').appendChild(div.firstElementChild);
+            
+            // Initialize CodeMirror for new textarea
+            const textarea = div.querySelector('.sql-editor');
+            CodeMirror.fromTextArea(textarea, {
+                mode: 'text/x-sql',
+                lineNumbers: true,
+                lineWrapping: true,
+                extraKeys: {"Ctrl-Space": "autocomplete"},
+                hintOptions: {tables: {}}
+            });
+            
+            columnIndex++;
+            generatePreview();
+        }
+
+        function removeColumn(button) {
+            button.closest('.column-item').remove();
+            generatePreview();
+        }
+
+        function addJoin() {
+            const html = `
+                <div class="draggable-item join-item" data-index="${joinIndex}">
+                    <div class="row">
+                        <div class="col-md-2">
+                            <label class="form-label">Type</label>
+                            <select class="form-select" name="joins[${joinIndex}][join_type]">
+                                <option value="INNER">INNER</option>
+                                <option value="LEFT">LEFT</option>
+                                <option value="RIGHT">RIGHT</option>
+                                <option value="FULL">FULL</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Table *</label>
+                            <input type="text" class="form-control" name="joins[${joinIndex}][table_name]" required>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label">Alias</label>
+                            <input type="text" class="form-control" name="joins[${joinIndex}][table_alias]">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Condition *</label>
+                            <input type="text" class="form-control" name="joins[${joinIndex}][join_condition]" required
+                                   placeholder="e.g., users.id = orders.user_id">
+                        </div>
+                        <div class="col-md-1">
+                            <label class="form-label">Order</label>
+                            <input type="number" class="form-control" name="joins[${joinIndex}][join_order]" value="${joinIndex}">
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-danger mt-2" onclick="removeJoin(this)">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            `;
+            
+            document.getElementById('joinsContainer').insertAdjacentHTML('beforeend', html);
+            joinIndex++;
+            generatePreview();
+        }
+
+        function removeJoin(button) {
+            button.closest('.join-item').remove();
+            generatePreview();
+        }
+
+        function addFilter() {
+            const html = `
+                <div class="draggable-item filter-item" data-index="${filterIndex}">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <label class="form-label">Type</label>
+                            <select class="form-select filter-type" name="filters[${filterIndex}][condition_type]"
+                                    onchange="toggleFilterFields(this)">
+                                <option value="WHERE">WHERE</option>
+                                <option value="HAVING">HAVING</option>
+                                <option value="EXISTS">EXISTS</option>
+                                <option value="NOT EXISTS">NOT EXISTS</option>
+                            </select>
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label">Expression *</label>
+                            <textarea class="form-control sql-editor" name="filters[${filterIndex}][condition_expression]" rows="2"></textarea>
+                        </div>
+                        <div class="col-md-4 filter-param-fields">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <label class="form-label">Parameter Name</label>
+                                    <input type="text" class="form-control" name="filters[${filterIndex}][parameter_name]">
+                                </div>
+                                <div class="col-md-6">
+                                    <label class="form-label">Parameter Type</label>
+                                    <select class="form-select" name="filters[${filterIndex}][parameter_type]">
+                                        <option value="string">String</option>
+                                        <option value="integer">Integer</option>
+                                        <option value="decimal">Decimal</option>
+                                        <option value="date">Date</option>
+                                        <option value="datetime">Datetime</option>
+                                        <option value="boolean">Boolean</option>
+                                        <option value="array">Array</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="row mt-2">
+                                <div class="col-md-12">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" name="filters[${filterIndex}][is_required]" value="1">
+                                        <label class="form-check-label">Required</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="button" class="btn btn-sm btn-danger mt-2" onclick="removeFilter(this)">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            `;
+            
+            document.getElementById('filtersContainer').insertAdjacentHTML('beforeend', html);
+            
+            // Initialize CodeMirror
+            const textarea = document.querySelector(`[name="filters[${filterIndex}][condition_expression]"]`);
+            CodeMirror.fromTextArea(textarea, {
+                mode: 'text/x-sql',
+                lineNumbers: true,
+                lineWrapping: true
+            });
+            
+            filterIndex++;
+            generatePreview();
+        }
+
+        function toggleFilterFields(select) {
+            const parent = select.closest('.filter-item');
+            const paramFields = parent.querySelector('.filter-param-fields');
+            
+            if (select.value === 'WHERE' || select.value === 'HAVING') {
+                paramFields.style.display = 'block';
+            } else {
+                paramFields.style.display = 'none';
+            }
+        }
+
+        function removeFilter(button) {
+            button.closest('.filter-item').remove();
+            generatePreview();
+        }
+
+        function addGroup() {
+            const html = `
+                <div class="draggable-item group-item" data-index="${groupIndex}">
+                    <div class="input-group">
+                        <input type="text" class="form-control" name="groups[${groupIndex}][column_alias]"
+                               placeholder="Column alias">
+                        <input type="number" class="form-control" style="width: 80px;"
+                               name="groups[${groupIndex}][group_order]" value="${groupIndex}">
+                        <button class="btn btn-outline-danger" type="button" onclick="removeGroup(this)">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('groupsContainer').insertAdjacentHTML('beforeend', html);
+            groupIndex++;
+            generatePreview();
+        }
+
+        function removeGroup(button) {
+            button.closest('.group-item').remove();
+            generatePreview();
+        }
+
+        function addOrder() {
+            const html = `
+                <div class="draggable-item order-item" data-index="${orderIndex}">
+                    <div class="input-group">
+                        <input type="text" class="form-control" name="orders[${orderIndex}][column_alias]"
+                               placeholder="Column alias">
+                        <select class="form-select" style="width: 100px;" name="orders[${orderIndex}][direction]">
+                            <option value="ASC">ASC</option>
+                            <option value="DESC">DESC</option>
+                        </select>
+                        <input type="number" class="form-control" style="width: 80px;"
+                               name="orders[${orderIndex}][order_priority]" value="${orderIndex}">
+                        <button class="btn btn-outline-danger" type="button" onclick="removeOrder(this)">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('ordersContainer').insertAdjacentHTML('beforeend', html);
+            orderIndex++;
+            generatePreview();
+        }
+
+        function removeOrder(button) {
+            button.closest('.order-item').remove();
+            generatePreview();
+        }
+
+        function generatePreview() {
+    // Collect form data
+    const formData = new FormData(document.getElementById('reportForm'));
+    
+    // Send AJAX request to generate preview
+    fetch('<?= site_url("api/reports/preview") ?>', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({expression: getSqlFromForm()})
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            document.getElementById('sqlPreview').textContent = data.data.expression;
+        } else {
+            document.getElementById('sqlPreview').textContent = 'Error: ' + data.message;
+        }
+    })
+    .catch(error => {
+        document.getElementById('sqlPreview').textContent = 'Error generating preview';
+    });
+}
+
+// Helper function to extract SQL from form
+function getSqlFromForm() {
+    const form = document.getElementById('reportForm');
+    const baseTable = form.querySelector('[name="base_table"]').value;
+    
+    let sql = `SELECT `;
+    
+    // Get columns
+    const columns = [];
+    document.querySelectorAll('.column-item').forEach(item => {
+        const expression = item.querySelector('[name*="[column_expression]"]').value;
+        const alias = item.querySelector('[name*="[alias]"]').value;
+        if (expression && alias) {
+            columns.push(`${expression} AS ${alias}`);
+        }
+    });
+    
+    sql += columns.length > 0 ? columns.join(', ') : '*';
+    sql += ` FROM ${baseTable}`;
+    
+    // Get joins
+    document.querySelectorAll('.join-item').forEach(item => {
+        const joinType = item.querySelector('[name*="[join_type]"]').value;
+        const table = item.querySelector('[name*="[table_name]"]').value;
+        const alias = item.querySelector('[name*="[table_alias]"]').value || '';
+        const condition = item.querySelector('[name*="[join_condition]"]').value;
+        
+        sql += ` ${joinType} JOIN ${table}`;
+        if (alias) sql += ` AS ${alias}`;
+        sql += ` ON ${condition}`;
+    });
+    
+    // Get WHERE conditions
+    const whereConditions = [];
+    document.querySelectorAll('.filter-item').forEach(item => {
+        const type = item.querySelector('[name*="[condition_type]"]').value;
+        const expression = item.querySelector('[name*="[condition_expression]"]').value;
+        
+        if (type === 'WHERE' && expression) {
+            whereConditions.push(expression);
+        }
+    });
+    
+    if (whereConditions.length > 0) {
+        sql += ` WHERE ` + whereConditions.join(' AND ');
+    }
+    
+    return sql;
+}
+    </script>
+</body>
+</html>
