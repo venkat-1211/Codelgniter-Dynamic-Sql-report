@@ -1,0 +1,180 @@
+<?php
+
+namespace App\Models;
+
+use CodeIgniter\Model;
+use App\Libraries\DynamicQueryBuilder;
+
+class ReportModel extends Model
+{
+    protected $table = 'reports';
+    protected $primaryKey = 'id';
+    protected $useAutoIncrement = true;
+    
+    protected $returnType = 'array';
+    protected $useSoftDeletes = true;
+    
+    protected $allowedFields = [
+        'report_name', 'base_table', 'description', 
+        'is_template', 'created_at', 'updated_at'
+    ];
+    
+    protected $useTimestamps = true;
+    protected $createdField = 'created_at';
+    protected $updatedField = 'updated_at';
+    protected $deletedField = 'deleted_at';
+    
+    protected $validationRules = [
+        'report_name' => 'required|min_length[3]|max_length[255]',
+        'base_table' => 'required|max_length[255]'
+    ];
+    
+    protected $validationMessages = [];
+    protected $skipValidation = false;
+    
+    /**
+     * Get report with all related data
+     */
+    public function getReportWithDetails($id)
+    {
+        $report = $this->find($id);
+        
+        if (!$report) {
+            return null;
+        }
+        
+        $db = \Config\Database::connect();
+        
+        // Get joins
+        $report['joins'] = $db->table('report_joins')
+            ->where('report_id', $id)
+            ->orderBy('join_order', 'ASC')
+            ->get()
+            ->getResultArray();
+        
+        // Get columns
+        $report['columns'] = $db->table('report_columns')
+            ->where('report_id', $id)
+            ->orderBy('column_order', 'ASC')
+            ->get()
+            ->getResultArray();
+        
+        // Get conditions
+        $report['conditions'] = $db->table('report_conditions')
+            ->where('report_id', $id)
+            ->orderBy('condition_order', 'ASC')
+            ->get()
+            ->getResultArray();
+        
+        // Get groups
+        $report['groups'] = $db->table('report_groups')
+            ->where('report_id', $id)
+            ->orderBy('group_order', 'ASC')
+            ->get()
+            ->getResultArray();
+        
+        // Get orders
+        $report['orders'] = $db->table('report_orders')
+            ->where('report_id', $id)
+            ->orderBy('order_sequence', 'ASC')
+            ->get()
+            ->getResultArray();
+        
+        // Get parameters
+        $report['parameters'] = $db->table('report_parameters')
+            ->where('report_id', $id)
+            ->orderBy('parameter_order', 'ASC')
+            ->get()
+            ->getResultArray();
+        
+        return $report;
+    }
+    
+    /**
+     * Execute report with parameters
+     */
+    public function executeReport($reportId, $parameters = [], $limit = null, $offset = 0)
+    {
+        $report = $this->getReportWithDetails($reportId);
+        
+        if (!$report) {
+            throw new \Exception("Report not found");
+        }
+        
+        $queryBuilder = new DynamicQueryBuilder();
+        
+        // Build the query
+        $query = $queryBuilder->buildQuery($report);
+        
+        // Get database connection
+        $db = \Config\Database::connect();
+        
+        // Prepare query with parameters
+        $builder = $db->table("({$query['sql']}) as report_data");
+        
+        // Apply parameters to conditions
+        if (!empty($query['params'])) {
+            foreach ($query['params'] as $param) {
+                $paramName = $param['name'];
+                if (isset($parameters[$paramName])) {
+                    // Replace placeholder with actual value
+                    $query['sql'] = str_replace(":{$paramName}", $db->escape($parameters[$paramName]), $query['sql']);
+                } elseif (isset($param['default'])) {
+                    $query['sql'] = str_replace(":{$paramName}", $db->escape($param['default']), $query['sql']);
+                }
+            }
+        }
+        
+        // Execute count query for pagination
+        $countQuery = "SELECT COUNT(*) as total FROM ({$query['sql']}) as count_table";
+        $countResult = $db->query($countQuery)->getRow();
+        $totalRows = $countResult->total;
+        
+        // Apply limit and offset
+        if ($limit) {
+            $query['sql'] .= " LIMIT {$limit} OFFSET {$offset}";
+        }
+        
+        // Execute main query
+        $result = $db->query($query['sql'])->getResultArray();
+        
+        return [
+            'data' => $result,
+            'total' => $totalRows,
+            'sql' => $query['sql'] // For debugging
+        ];
+    }
+    
+    /**
+     * Get all reports with pagination
+     */
+    public function getAllReports($page = 1, $perPage = 20, $search = '')
+    {
+        $builder = $this->builder();
+        
+        if ($search) {
+            $builder->groupStart()
+                ->like('report_name', $search)
+                ->orLike('description', $search)
+                ->orLike('base_table', $search)
+                ->groupEnd();
+        }
+        
+        $total = $builder->countAllResults(false);
+        
+        $reports = $builder->select('*')
+            ->where('deleted_at', null)
+            ->orderBy('created_at', 'DESC')
+            ->limit($perPage, ($page - 1) * $perPage)
+            ->get()
+            ->getResultArray();
+        
+        return [
+            'data' => $reports,
+            'total' => $total,
+            'page' => $page,
+            'perPage' => $perPage,
+            'totalPages' => ceil($total / $perPage)
+        ];
+    }
+}

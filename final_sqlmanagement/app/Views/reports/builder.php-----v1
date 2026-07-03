@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Report Builder</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/hint/show-hint.min.css" rel="stylesheet">
+    <style>
+        .builder-container {
+            min-height: calc(100vh - 200px);
+        }
+        .section-card {
+            margin-bottom: 20px;
+            border-left: 4px solid #0d6efd;
+        }
+        .sql-preview {
+            font-family: 'Courier New', monospace;
+            background: #f8f9fa;
+            border-radius: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .draggable-item {
+            cursor: move;
+            padding: 10px;
+            margin: 5px 0;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+        }
+        .draggable-item:hover {
+            background: #f8f9fa;
+        }
+        .CodeMirror {
+            height: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+        }
+        .table-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="<?= base_url('reports') ?>">
+                <i class="fas fa-arrow-left"></i> Report Builder
+            </a>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <form id="reportForm">
+            <input type="hidden" name="id" value="<?= $report['id'] ?? '' ?>">
+            
+            <div class="row">
+                <!-- Left Panel: Report Structure -->
+                <div class="col-md-8">
+                    <div class="card section-card">
+                        <div class="card-header bg-primary text-white">
+                            <h5 class="mb-0"><i class="fas fa-info-circle"></i> Report Information</h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Report Name *</label>
+                                        <input type="text" class="form-control" name="report_name" 
+                                               value="<?= htmlspecialchars($report['report_name'] ?? '') ?>" 
+                                               required>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">Base Table *</label>
+                                        <select class="form-control" name="base_table" id="baseTable" required>
+                                            <option value="">Select a table</option>
+                                            <?php foreach ($tables as $table): ?>
+                                                <option value="<?= $table ?>" 
+                                                    <?= ($report['base_table'] ?? '') == $table ? 'selected' : '' ?>>
+                                                    <?= $table ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label">Description</label>
+                                <textarea class="form-control" name="description" rows="2"><?= htmlspecialchars($report['description'] ?? '') ?></textarea>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" name="is_template" value="1" 
+                                       <?= ($report['is_template'] ?? 0) ? 'checked' : '' ?>>
+                                <label class="form-check-label">Save as template</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Columns Section -->
+                    <div class="card section-card">
+                        <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0"><i class="fas fa-columns"></i> Columns</h5>
+                            <button type="button" class="btn btn-light btn-sm" onclick="addColumn()">
+                                <i class="fas fa-plus"></i> Add Column
+                            </button>
+                        </div>
+                        <div class="card-body">
+                            <div id="columnsContainer">
+                                <?php if (!empty($report['columns'])): ?>
+                                    <?php foreach ($report['columns'] as $index => $column): ?>
+                                        <div class="draggable-item column-item" data-index="<?= $index ?>">
+                                            <div class="row">
+                                                <div class="col-md-5">
+                                                    <input type="text" class="form-control" 
+                                                           name="columns[<?= $index ?>][column_expression]"
+                                                           value="<?= htmlspecialchars($column['column_expression']) ?>"
+                                                           placeholder="Column expression (e.g., table.column)">
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <input type="text" class="form-control" 
+                                                           name="columns[<?= $index ?>][alias]"
+                                                           value="<?= htmlspecialchars($column['alias']) ?>"
+                                                           placeholder="Alias">
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <select class="form-control" 
+                                                            name="columns[<?= $index ?>][column_type]">
+                                                        <option value="SELECT" <?= $column['column_type'] == 'SELECT' ? 'selected' : '' ?>>SELECT</option>
+                                                        <option value="CALCULATED" <?= $column['column_type'] == 'CALCULATED' ? 'selected' : '' ?>>CALCULATED</option>
+                                                        <option value="CONDITIONAL" <?= $column['column_type'] == 'CONDITIONAL' ? 'selected' : '' ?>>CONDITIONAL</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <button type="button" class="btn btn-danger btn-sm" onclick="removeColumn(this)">
+                                                        <i class="fas fa-trash"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Joins Section -->
+                    <div class="card section-card">
+                        <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0"><i class="fas fa-link"></i> JOINs</h5>
+                            <button type="button" class="btn btn-light btn-sm" onclick="addJoin()">
+                                <i class="fas fa-plus"></i> Add JOIN
+                            </button>
+                        </div>
+                        <div class="card-body">
+                            <div id="joinsContainer">
+                                <?php if (!empty($report['joins'])): ?>
+                                    <?php foreach ($report['joins'] as $index => $join): ?>
+                                        <div class="draggable-item join-item" data-index="<?= $index ?>">
+                                            <div class="row">
+                                                <div class="col-md-2">
+                                                    <select class="form-control" 
+                                                            name="joins[<?= $index ?>][join_type]">
+                                                        <option value="INNER" <?= $join['join_type'] == 'INNER' ? 'selected' : '' ?>>INNER</option>
+                                                        <option value="LEFT" <?= $join['join_type'] == 'LEFT' ? 'selected' : '' ?>>LEFT</option>
+                                                        <option value="RIGHT" <?= $join['join_type'] == 'RIGHT' ? 'selected' : '' ?>>RIGHT</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-3">
+                                                    <select class="form-control join-table" 
+                                                            name="joins[<?= $index ?>][table_name]">
+                                                        <option value="">Select table</option>
+                                                        <?php foreach ($tables as $table): ?>
+                                                            <option value="<?= $table ?>" 
+                                                                <?= $join['table_name'] == $table ? 'selected' : '' ?>>
+                                                                <?= $table ?>
+                                                            </option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <input type="text" class="form-control" 
+                                                           name="joins[<?= $index ?>][alias]"
+                                                           value="<?= htmlspecialchars($join['alias'] ?? '') ?>"
+                                                           placeholder="Alias">
+                                                </div>
+                                                <div class="col-md-4">
+                                                    <input type="text" class="form-control" 
+                                                           name="joins[<?= $index ?>][join_condition]"
+                                                           value="<?= htmlspecialchars($join['join_condition']) ?>"
+                                                           placeholder="Join condition (e.g., t1.id = t2.table_id)">
+                                                </div>
+                                                <div class="col-md-1">
+                                                    <button type="button" class="btn btn-danger btn-sm" onclick="removeJoin(this)">
+                                                        <i class="fas fa-trash"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Conditions Section -->
+                    <div class="card section-card">
+                        <div class="card-header bg-danger text-white d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0"><i class="fas fa-filter"></i> Conditions</h5>
+                            <button type="button" class="btn btn-light btn-sm" onclick="addCondition()">
+                                <i class="fas fa-plus"></i> Add Condition
+                            </button>
+                        </div>
+                        <div class="card-body">
+                            <div id="conditionsContainer">
+                                <?php if (!empty($report['conditions'])): ?>
+                                    <?php foreach ($report['conditions'] as $index => $condition): ?>
+                                        <div class="draggable-item condition-item" data-index="<?= $index ?>">
+                                            <div class="row">
+                                                <div class="col-md-3">
+                                                    <select class="form-control" 
+                                                            name="conditions[<?= $index ?>][condition_type]">
+                                                        <option value="WHERE" <?= $condition['condition_type'] == 'WHERE' ? 'selected' : '' ?>>WHERE</option>
+                                                        <option value="HAVING" <?= $condition['condition_type'] == 'HAVING' ? 'selected' : '' ?>>HAVING</option>
+                                                        <option value="EXISTS" <?= $condition['condition_type'] == 'EXISTS' ? 'selected' : '' ?>>EXISTS</option>
+                                                        <option value="NOT EXISTS" <?= $condition['condition_type'] == 'NOT EXISTS' ? 'selected' : '' ?>>NOT EXISTS</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-6">
+                                                    <textarea class="form-control" 
+                                                              name="conditions[<?= $index ?>][condition_expression]"
+                                                              rows="1"
+                                                              placeholder="Condition expression"><?= htmlspecialchars($condition['condition_expression']) ?></textarea>
+                                                </div>
+                                                <div class="col-md-2">
+                                                    <select class="form-control" 
+                                                            name="conditions[<?= $index ?>][operator]">
+                                                        <option value="AND" <?= ($condition['operator'] ?? 'AND') == 'AND' ? 'selected' : '' ?>>AND</option>
+                                                        <option value="OR" <?= ($condition['operator'] ?? 'AND') == 'OR' ? 'selected' : '' ?>>OR</option>
+                                                    </select>
+                                                </div>
+                                                <div class="col-md-1">
+                                                    <button type="button" class="btn btn-danger btn-sm" onclick="removeCondition(this)">
+                                                        <i class="fas fa-trash"></i>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right Panel: Tools and Preview -->
+                <div class="col-md-4">
+                    <!-- SQL Functions -->
+                    <div class="card mb-4">
+                        <div class="card-header bg-success text-white">
+                            <h6 class="mb-0"><i class="fas fa-code"></i> SQL Functions</h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <button type="button" class="btn btn-outline-success w-100 mb-2" onclick="insertFunction('CONCAT(')">
+                                        CONCAT()
+                                    </button>
+                                </div>
+                                <div class="col-6">
+                                    <button type="button" class="btn btn-outline-success w-100 mb-2" onclick="insertFunction('CASE WHEN THEN END')">
+                                        CASE WHEN
+                                    </button>
+                                </div>
+                                <div class="col-6">
+                                    <button type="button" class="btn btn-outline-success w-100 mb-2" onclick="insertFunction('SUM()')">
+                                        SUM()
+                                    </button>
+                                </div>
+                                <div class="col-6">
+                                    <button type="button" class="btn btn-outline-success w-100 mb-2" onclick="insertFunction('COUNT()')">
+                                        COUNT()
+                                    </button>
+                                </div>
+                                <div class="col-6">
+                                    <button type="button" class="btn btn-outline-success w-100 mb-2" onclick="insertFunction('DATE()')">
+                                        DATE()
+                                    </button>
+                                </div>
+                                <div class="col-6">
+                                    <button type="button" class="btn btn-outline-success w-100 mb-2" onclick="insertFunction('COALESCE()')">
+                                        COALESCE()
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Database Tables -->
+                    <div class="card mb-4">
+                        <div class="card-header bg-secondary text-white">
+                            <h6 class="mb-0"><i class="fas fa-database"></i> Database Tables</h6>
+                        </div>
+                        <div class="card-body table-list">
+                            <?php foreach ($tables as $table): ?>
+                                <div class="table-item mb-2">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span class="table-name"><?= $table ?></span>
+                                        <button type="button" class="btn btn-sm btn-outline-primary" 
+                                                onclick="showTableColumns('<?= $table ?>')">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+
+                    <!-- SQL Preview -->
+                    <div class="card">
+                        <div class="card-header bg-dark text-white">
+                            <h6 class="mb-0"><i class="fas fa-eye"></i> SQL Preview</h6>
+                        </div>
+                        <div class="card-body">
+                            <div id="sqlPreview" class="sql-preview p-3">
+                                <em class="text-muted">SQL will appear here...</em>
+                            </div>
+                            <button type="button" class="btn btn-primary w-100 mt-3" onclick="previewSql()">
+                                <i class="fas fa-sync"></i> Generate Preview
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Save Buttons -->
+                    <div class="card mt-4">
+                        <div class="card-body">
+                            <div class="d-grid gap-2">
+                                <button type="button" class="btn btn-success" onclick="saveReport()">
+                                    <i class="fas fa-save"></i> Save Report
+                                </button>
+                                <button type="button" class="btn btn-primary" onclick="saveAndExecute()">
+                                    <i class="fas fa-play"></i> Save & Execute
+                                </button>
+                                <a href="<?= base_url('reports') ?>" class="btn btn-secondary">
+                                    <i class="fas fa-times"></i> Cancel
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <!-- Table Columns Modal -->
+    <div class="modal fade" id="columnsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Table Columns: <span id="modalTableName"></span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <table class="table table-striped" id="columnsTable">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Type</th>
+                                <th>Max Length</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="columnsTableBody">
+                            <!-- Columns will be loaded here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/mode/sql/sql.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/hint/show-hint.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.2/addon/hint/sql-hint.min.js"></script>
+    
+    <script>
+        let columnIndex = <?= count($report['columns'] ?? []) ?>;
+        let joinIndex = <?= count($report['joins'] ?? []) ?>;
+        let conditionIndex = <?= count($report['conditions'] ?? []) ?>;
+
+        function addColumn() {
+            const html = `
+                <div class="draggable-item column-item" data-index="${columnIndex}">
+                    <div class="row">
+                        <div class="col-md-5">
+                            <input type="text" class="form-control" 
+                                   name="columns[${columnIndex}][column_expression]"
+                                   placeholder="Column expression (e.g., table.column)">
+                        </div>
+                        <div class="col-md-3">
+                            <input type="text" class="form-control" 
+                                   name="columns[${columnIndex}][alias]"
+                                   placeholder="Alias">
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-control" 
+                                    name="columns[${columnIndex}][column_type]">
+                                <option value="SELECT">SELECT</option>
+                                <option value="CALCULATED">CALCULATED</option>
+                                <option value="CONDITIONAL">CONDITIONAL</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <button type="button" class="btn btn-danger btn-sm" onclick="removeColumn(this)">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+            $('#columnsContainer').append(html);
+            columnIndex++;
+        }
+
+        function addJoin() {
+            const html = `
+                <div class="draggable-item join-item" data-index="${joinIndex}">
+                    <div class="row">
+                        <div class="col-md-2">
+                            <select class="form-control" 
+                                    name="joins[${joinIndex}][join_type]">
+                                <option value="INNER">INNER</option>
+                                <option value="LEFT">LEFT</option>
+                                <option value="RIGHT">RIGHT</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-control join-table" 
+                                    name="joins[${joinIndex}][table_name]">
+                                <option value="">Select table</option>
+                                <?php foreach ($tables as $table): ?>
+                                    <option value="<?= $table ?>"><?= $table ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <input type="text" class="form-control" 
+                                   name="joins[${joinIndex}][alias]"
+                                   placeholder="Alias">
+                        </div>
+                        <div class="col-md-4">
+                            <input type="text" class="form-control" 
+                                   name="joins[${joinIndex}][join_condition]"
+                                   placeholder="Join condition (e.g., t1.id = t2.table_id)">
+                        </div>
+                        <div class="col-md-1">
+                            <button type="button" class="btn btn-danger btn-sm" onclick="removeJoin(this)">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+            $('#joinsContainer').append(html);
+            joinIndex++;
+        }
+
+        function addCondition() {
+            const html = `
+                <div class="draggable-item condition-item" data-index="${conditionIndex}">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <select class="form-control" 
+                                    name="conditions[${conditionIndex}][condition_type]">
+                                <option value="WHERE">WHERE</option>
+                                <option value="HAVING">HAVING</option>
+                                <option value="EXISTS">EXISTS</option>
+                                <option value="NOT EXISTS">NOT EXISTS</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <textarea class="form-control" 
+                                      name="conditions[${conditionIndex}][condition_expression]"
+                                      rows="1"
+                                      placeholder="Condition expression"></textarea>
+                        </div>
+                        <div class="col-md-2">
+                            <select class="form-control" 
+                                    name="conditions[${conditionIndex}][operator]">
+                                <option value="AND">AND</option>
+                                <option value="OR">OR</option>
+                            </select>
+                        </div>
+                        <div class="col-md-1">
+                            <button type="button" class="btn btn-danger btn-sm" onclick="removeCondition(this)">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+            $('#conditionsContainer').append(html);
+            conditionIndex++;
+        }
+
+        function removeColumn(button) {
+            $(button).closest('.column-item').remove();
+        }
+
+        function removeJoin(button) {
+            $(button).closest('.join-item').remove();
+        }
+
+        function removeCondition(button) {
+            $(button).closest('.condition-item').remove();
+        }
+
+        function insertFunction(func) {
+            // This would insert the function into the currently focused input
+            const focused = document.activeElement;
+            if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA')) {
+                const start = focused.selectionStart;
+                const end = focused.selectionEnd;
+                const value = focused.value;
+                focused.value = value.substring(0, start) + func + value.substring(end);
+                focused.selectionStart = focused.selectionEnd = start + func.length;
+                focused.focus();
+            }
+        }
+
+        function showTableColumns(tableName) {
+            $('#modalTableName').text(tableName);
+            $('#columnsTableBody').html('<tr><td colspan="4" class="text-center">Loading...</td></tr>');
+            
+            $.ajax({
+                url: '<?= base_url("reports/get-table-columns") ?>',
+                type: 'GET',
+                data: { table: tableName },
+                success: function(response) {
+                    if (response.status === 'success') {
+                        let html = '';
+                        response.columns.forEach(function(column) {
+                            html += `
+                                <tr>
+                                    <td>${column.name}</td>
+                                    <td><span class="badge bg-secondary">${column.type}</span></td>
+                                    <td>${column.max_length || '-'}</td>
+                                    <td>
+                                        <button type="button" class="btn btn-sm btn-outline-primary" 
+                                                onclick="insertColumn('${tableName}.${column.name}')">
+                                            <i class="fas fa-plus"></i> Insert
+                                        </button>
+                                    </td>
+                                </tr>`;
+                        });
+                        $('#columnsTableBody').html(html);
+                    }
+                }
+            });
+            
+            $('#columnsModal').modal('show');
+        }
+
+        function insertColumn(columnName) {
+            const focused = document.activeElement;
+            if (focused && (focused.tagName === 'INPUT' || focused.tagName === 'TEXTAREA')) {
+                const start = focused.selectionStart;
+                const end = focused.selectionEnd;
+                const value = focused.value;
+                focused.value = value.substring(0, start) + columnName + value.substring(end);
+                focused.selectionStart = focused.selectionEnd = start + columnName.length;
+                focused.focus();
+            }
+            $('#columnsModal').modal('hide');
+        }
+
+        function previewSql() {
+            const formData = new FormData(document.getElementById('reportForm'));
+            const data = {};
+            formData.forEach((value, key) => {
+                // Handle arrays
+                if (key.includes('[')) {
+                    const matches = key.match(/(\w+)\[(\d+)\]\[(\w+)\]/);
+                    if (matches) {
+                        const [, type, index, field] = matches;
+                        if (!data[type]) data[type] = [];
+                        if (!data[type][index]) data[type][index] = {};
+                        data[type][index][field] = value;
+                    }
+                } else {
+                    data[key] = value;
+                }
+            });
+
+            // Convert arrays to proper format
+            for (const key in data) {
+                if (Array.isArray(data[key])) {
+                    data[key] = data[key].filter(item => item);
+                }
+            }
+
+            $.ajax({
+                url: '<?= base_url("reports/preview-sql") ?>',
+                type: 'POST',
+                data: JSON.stringify(data),
+                contentType: 'application/json',
+                success: function(response) {
+                    if (response.status === 'success') {
+                        $('#sqlPreview').html('<pre>' + response.sql + '</pre>');
+                    }
+                }
+            });
+        }
+
+        function saveReport() {
+            const formData = new FormData(document.getElementById('reportForm'));
+            
+            $.ajax({
+                url: '<?= base_url("reports/save") ?>',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function(response) {
+                    if (response.status === 'success') {
+                        alert('Report saved successfully!');
+                        window.location.href = '<?= base_url("reports") ?>';
+                    }
+                },
+                error: function(xhr) {
+                    alert('Error: ' + xhr.responseText);
+                }
+            });
+        }
+
+        function saveAndExecute() {
+            const formData = new FormData(document.getElementById('reportForm'));
+            
+            $.ajax({
+                url: '<?= base_url("reports/save") ?>',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function(response) {
+                    if (response.status === 'success') {
+                        window.location.href = '<?= base_url("reports/execute") ?>/' + response.report_id;
+                    }
+                },
+                error: function(xhr) {
+                    alert('Error: ' + xhr.responseText);
+                }
+            });
+        }
+    </script>
+</body>
+</html>

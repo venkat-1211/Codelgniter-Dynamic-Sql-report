@@ -1,0 +1,7 @@
+1. Debugging
+            log_message(
+                'error',
+                'Preview SQL Error: ' . $e->getMessage() .
+                ' at line ' . $e->getLine() .
+                ' in file ' . $e->getFile()
+            );
